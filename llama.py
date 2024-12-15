@@ -9,6 +9,7 @@ from base_llama import LlamaPreTrainedModel, LlamaConfig
 from rope import apply_rotary_emb
 from utils import *
 
+
 # Root Mean Square Layer Normalization (https://arxiv.org/abs/1910.07467)
 # borrowed from the official Llama implementation:
 # https://github.com/facebookresearch/llama/blob/main/llama/model.py
@@ -37,14 +38,16 @@ class RMSNorm(torch.nn.Module):
         the given epsilon value (self.eps) to the tensor's norm (i.e. inside
         the square root in Equation 4) before normalizing the tensor.
 
+        As RMSNorm does not consider the mean of the inputs, it's not re-centering invariant. This is the main difference compared to LayerNorm.
+        (No substraction to the mean of the data)
         Args:
             x (torch.Tensor): The input tensor.
 
         Returns:
             torch.Tensor: The normalized tensor.
         """
-        # todo
-        raise NotImplementedError
+        out = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)  # xnorm = x/((sqrt(x^2)+ eps))
+        return out
 
     def forward(self, x):
         """
@@ -60,8 +63,18 @@ class RMSNorm(torch.nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
+
 class Attention(nn.Module):
     def __init__(self, config: LlamaConfig):
+        """
+        Initialize the Attention module.
+        Attributes:
+            n_kv_heads (int): Number of key and value heads.
+            n_local_heads (int): Number of local query heads.
+            n_local_kv_heads (int): Number of local key and value heads.
+            n_rep (int): Number of repetitions for local heads.
+            head_dim (int): Dimension size of each attention head.
+        """
         super().__init__()
         self.n_kv_heads = config.n_heads if config.n_kv_heads is None else config.n_kv_heads
         assert config.n_heads % self.n_kv_heads == 0
@@ -69,12 +82,15 @@ class Attention(nn.Module):
         self.n_local_heads = config.n_heads // model_parallel_size
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
+
         self.head_dim = config.dim // config.n_heads
         self.max_seq_len = config.max_seq_len
+
         self.compute_query = nn.Linear(config.dim, config.n_heads * self.head_dim, bias=False)
         self.compute_key = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.compute_value = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.compute_output = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
+
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.dropout = config.dropout
@@ -84,27 +100,44 @@ class Attention(nn.Module):
                                        key: torch.Tensor,
                                        value: torch.Tensor) -> torch.Tensor:
         '''
+        query: B,H,D,L
+        key: B,H,D,L
+        value: B,H,D,L
+
         Jointly compute Scaled Dot Product Attention (see Section 3.2.1 in
         https://arxiv.org/abs/1706.03762 for details). The query, key, and
         value tensors each have shape (bs, n_local_heads, seqlen, head_dim).
-        An optimal implemention will jointly computing attention for multiple
+        An optimal implementation will jointly compute attention for multiple
         heads (n_local_heads of them) at once using matrix/tensor operations.
 
         Make sure to use attention_dropout (self.attn_dropout) on the computed
         attention matrix before applying it to the value tensor.
         '''
         # todo
-        raise NotImplementedError
+        score = torch.matmul(query, key.transpose(2, 3)) / math.sqrt(
+            self.head_dim)  # keys.transpose(2, 3) to get (B,n_heads,head_dim,seqlen)
+        score = F.softmax(score.float(), dim=-1).type_as(query)
+        score = self.attn_dropout(score)
+        output = torch.matmul(score, value)
+
+        return output
 
     def forward(
-        self,
-        x: torch.Tensor
+            self,
+            x: torch.Tensor
     ):
         '''
         Llama2 uses Grouped-Query Attention. The details of GQA are actually
         not critical to solving this assignment; you are simply asked to
         compute Scaled Dot Product Attention (see above for details). GQA is
-        a memory optimization to compute multi-head attention efficiently. See
+        a memory optimization to compute multi-head attention efficiently.
+        Ex: GQA with H = 8 and G = 2
+        - 8 query head are split into 2 groups
+        - Instead of computing 8 sets of KV, we compute only 2 sets of KV:
+            + Group 1: Head 1-4 shares K1, V1
+            + Group 2: Head 5-8 shares K2, V2
+
+        See
         Section 2.2 in https://arxiv.org/abs/2305.13245 or
         https://ai.plainenglish.io/understanding-llama2-kv-cache-grouped-query-attention-rotary-embedding-and-more-c17e5f49a6d7
         for details.
@@ -114,6 +147,7 @@ class Attention(nn.Module):
         query = self.compute_query(x)
         key = self.compute_key(x)
         value = self.compute_value(x)
+
         query = query.view(batch_size, seqlen, self.n_local_heads, self.head_dim)
         key = key.view(batch_size, seqlen, self.n_local_kv_heads, self.head_dim)
         value = value.view(batch_size, seqlen, self.n_local_kv_heads, self.head_dim)
@@ -131,6 +165,7 @@ class Attention(nn.Module):
         query = query.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
+
         output = self.compute_query_key_value_scores(query, key, value)
 
         # restore time as batch dimension and concat heads
@@ -186,18 +221,27 @@ class LlamaLayer(nn.Module):
         This is the forward pass of the basic transformer building block. This is a
         modernized version of the block shown on the left of Figure 1 on
         https://arxiv.org/pdf/1706.03762.pdf.
+        In LLama they used pre-norm instead of post-norm in Vanilla et al.
 
         The transformer block should consist of:
         1) layer normalization of the input (via Root Mean Square layer normalization)
         2) self-attention on the layer-normalized input
         3) a residual connection (i.e., add the input to the output of the self-attention)
-        3) layer normalization on the output of the self-attention
-        4) a feed-forward network on the layer-normalized output of the self-attention
-        5) add a residual connection from the unnormalized self-attention output to the
+        4) normalize the output of step 3
+        5) a feed-forward network on the layer-normalized output of the self-attention
+        6) add a residual connection from the unnormalized self-attention output to the
            output of the feed-forward network
         '''
         # todo
-        raise NotImplementedError
+        norm_x = self.attention_norm(x)  # Pre norm
+        attn_x = self.attention(norm_x)
+        x = x + attn_x
+
+        attn_x = self.ffn_norm(x)  # Pre norm
+        ffn_attn = self.feed_forward(attn_x)
+        x = x + ffn_attn
+        return x
+
 
 class Llama(LlamaPreTrainedModel):
     def __init__(self, config: LlamaConfig):
@@ -219,7 +263,7 @@ class Llama(LlamaPreTrainedModel):
         self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
 
         # share the unembedding parameters with the embedding parameters
-        self.tok_embeddings.weight = self.output.weight # https://paperswithcode.com/method/weight-tying
+        self.tok_embeddings.weight = self.output.weight  # https://paperswithcode.com/method/weight-tying
 
         # some useful precompute for the RoPE relative positional embeddings
 
@@ -228,7 +272,7 @@ class Llama(LlamaPreTrainedModel):
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('w3.weight') or pn.endswith('compute_output.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layers))
+                torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layers))
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -252,13 +296,15 @@ class Llama(LlamaPreTrainedModel):
             logits = self.output(h)
         else:
             # inference-time mini-optimization: only forward the output on the very last position
-            logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.output(h[:, [-1], :])  # note: using list [-1] to preserve the time dim
 
         return logits, h
 
     @torch.inference_mode()
     def generate(self, idx, max_new_tokens, temperature=1.0):
         """
+        idx: [B,seqlen]
+
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         We perform this generation using basic temperature sampling. Note that we are not using
@@ -271,50 +317,51 @@ class Llama(LlamaPreTrainedModel):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.params.max_seq_len else idx[:, -self.params.max_seq_len:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] # crop to just the final time step
+            logits, _ = self(idx_cond)  # [B,seqlen,vocab_size]
+            logits = logits[:, -1, :]  # crop to just the final time step [B,vocab_size]
             # todo
-            raise NotImplementedError
-
             if temperature == 0.0:
                 # select the single most likely index
-                idx_next = None
+                idx_next = torch.argmax(logits, dim=-1)
             else:
                 '''
                 Perform temperature sampling:
-                1) identify  the logits at the final step.
+                1) identify the logits at the final step.
                 2) scale (divide) these probabilities by the given temperature.
                 3) normalize the scaled logits with a softmax to obtain scaled probabilities.
                 4) sample from the scaled probability distribution.
-
+                
                 Note that we are not using top-k sampling/nucleus sampling in this procedure.
                 '''
-                idx_next = None
+                scaled_logits = logits / temperature
+                probs_logits = torch.softmax(scaled_logits, dim=-1)
+                idx_next = torch.multinomial(probs_logits, num_samples=1)
+
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-
         return idx
 
+
 def load_pretrained(checkpoint):
-  device = 'cuda' if torch.cuda.is_available() else 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
-  #dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
-  dtype = "float32"
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+    # dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
+    dtype = "float32"
 
-  torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-  torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-  device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
-  ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
-  ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+    torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
+    torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
+    device_type = 'cuda' if 'cuda' in device else 'cpu'  # for later use in torch.autocast
+    ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+    ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-  # init from a model saved in a specific directory
-  checkpoint_dict = torch.load(checkpoint, map_location=device)
-  config = LlamaConfig(**checkpoint_dict['model_args'])
-  model = Llama(config)
-  state_dict = checkpoint_dict['model']
-  unwanted_prefix = '_orig_mod.'
-  for k,v in list(state_dict.items()):
-      if k.startswith(unwanted_prefix):
-          state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-  model.load_state_dict(state_dict, strict=False)
-  return model
+    # init from a model saved in a specific directory
+    checkpoint_dict = torch.load(checkpoint, map_location=device)
+    config = LlamaConfig(**checkpoint_dict['model_args'])
+    model = Llama(config)
+    state_dict = checkpoint_dict['model']
+    unwanted_prefix = '_orig_mod.'
+    for k, v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+    model.load_state_dict(state_dict, strict=False)
+    return model

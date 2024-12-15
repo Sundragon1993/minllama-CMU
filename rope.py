@@ -1,6 +1,7 @@
 from typing import Tuple
 import torch
 
+
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     """
     Helper function to reshape frequency tensor to have the same shape as the target tensor 'x'
@@ -23,12 +24,13 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(shape)
 
+
 def apply_rotary_emb(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    head_dim: int,
-    max_seq_len: int,
-    theta: float = 10000.0,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        head_dim: int,
+        max_seq_len: int,
+        theta: float = 10000.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary embeddings to input tensors using the given frequency tensor.
