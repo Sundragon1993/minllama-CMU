@@ -284,7 +284,7 @@ class Llama(LlamaPreTrainedModel):
 
     def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
         _batch_size, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
+        h = self.tok_embeddings(tokens) # [B, seqlen,dim]
         h = self.dropout(h)
 
         for layer in self.layers:
@@ -297,7 +297,7 @@ class Llama(LlamaPreTrainedModel):
         else:
             # inference-time mini-optimization: only forward the output on the very last position
             logits = self.output(h[:, [-1], :])  # note: using list [-1] to preserve the time dim
-
+            # [B, seqlen, vocab_size]
         return logits, h
 
     @torch.inference_mode()
