@@ -100,15 +100,15 @@ def model_eval(dataloader, model, device):
 	for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
 		b_ids, b_labels, b_sents = batch['token_ids'], batch['labels'], batch['sents']
 
-		b_ids = b_ids.to(device)
+		b_ids = b_ids.to(device) #[10,66] [B,seqlen]
 
 		logits = model(b_ids)
 		logits = logits.detach().cpu().numpy()
 		preds = np.argmax(logits, axis=1).flatten()
 
 		b_labels = b_labels.flatten()
-		y_true.extend(b_labels)
-		y_pred.extend(preds)
+		y_true.extend(b_labels) # [2,3,4,5,2,2....]
+		y_pred.extend(preds) # [1,2,3,4,5,,4,....
 		sents.extend(b_sents)
 
 	f1 = f1_score(y_true, y_pred, average='macro')

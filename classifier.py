@@ -12,7 +12,7 @@ class LlamaZeroShotClassifier(torch.nn.Module):
         super(LlamaZeroShotClassifier, self).__init__()
         self.num_labels = config.num_labels
         self.llama = load_pretrained(config.pretrained_model_path)
-        # Zero-shot classification does not require updating llama paramters.
+        # Zero-shot classification does not require updating llama parameters.
         for param in self.llama.parameters():
             param.requires_grad = False
         assert len(label_names) == self.num_labels
@@ -21,12 +21,13 @@ class LlamaZeroShotClassifier(torch.nn.Module):
 
     def forward(self, input_ids):
         # compute the completion probability of each label string
-        logits, _ = self.llama(input_ids)
+        logits, _ = self.llama(input_ids)  # [B,seqlen,vocab_size], each token in seqlen should be allocated to a vocab
         log_probabilities = F.log_softmax(logits, dim=-1)
         label_probabilities = torch.zeros((log_probabilities.shape[0], self.num_labels),
-                                          device=log_probabilities.device)
+                                          device=log_probabilities.device)  # [10,5]
         for i, label_token_ids in enumerate(self.label_name_ids):
-            total_log_prob = torch.sum(log_probabilities[:, :, label_token_ids], axis=-1)
+            total_log_prob = torch.sum(log_probabilities[:, :, label_token_ids],
+                                       axis=-1)  # [1,66,32000] take the 'neutral' at 28893, each word in sentence has a relationship with 'neutral' => sum their prob across the sentence
             label_probabilities[:, i] = total_log_prob[:, 0]
         return label_probabilities
 

@@ -284,12 +284,12 @@ class Llama(LlamaPreTrainedModel):
 
     def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
         _batch_size, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens) # [B, seqlen,dim]
+        h = self.tok_embeddings(tokens)  # [B, seqlen,dim]
         h = self.dropout(h)
 
         for layer in self.layers:
             h = layer(h)
-        h = self.norm(h)
+        h = self.norm(h) #[B,seglen,h_dim]
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
@@ -322,7 +322,7 @@ class Llama(LlamaPreTrainedModel):
             # todo
             if temperature == 0.0:
                 # select the single most likely index
-                idx_next = torch.argmax(logits, dim=-1)
+                idx_next = torch.argmax(logits, dim=-1).view(1, 1)
             else:
                 '''
                 Perform temperature sampling:
@@ -335,8 +335,9 @@ class Llama(LlamaPreTrainedModel):
                 '''
                 scaled_logits = logits / temperature
                 probs_logits = torch.softmax(scaled_logits, dim=-1)
-                idx_next = torch.multinomial(probs_logits, num_samples=1)
+                idx_next = torch.multinomial(probs_logits, num_samples=1).view(1, 1)
 
+            print(f'[D] idx_next shape: {idx_next.shape} while id shape: {idx.shape}')
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
