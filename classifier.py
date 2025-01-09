@@ -27,8 +27,8 @@ class LlamaZeroShotClassifier(torch.nn.Module):
                                           device=log_probabilities.device)  # [10,5]
         for i, label_token_ids in enumerate(self.label_name_ids):
             total_log_prob = torch.sum(log_probabilities[:, :, label_token_ids],
-                                       axis=-1)  # [1,66,32000] take the 'neutral' at 28893, each word in sentence has a relationship with 'neutral' => sum their prob across the sentence
-            label_probabilities[:, i] = total_log_prob[:, 0]
+                                       axis=-1)  # [1,66,32000] take the 'neutral' at 28893, each word in sentence has a relationship with 'neutral' => sum their prob across the sentence [66]
+            label_probabilities[:, i] = total_log_prob[:, 0] # following column first [ 28893,5553,6653,..] = > 10 then 10 then 10 then 10 then 10
         return label_probabilities
 
 
