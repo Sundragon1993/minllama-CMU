@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from triton.ops.blocksparse import softmax
 
 # change it with respect to the original model
 from config import LlamaConfig
@@ -28,7 +29,8 @@ class LlamaZeroShotClassifier(torch.nn.Module):
         for i, label_token_ids in enumerate(self.label_name_ids):
             total_log_prob = torch.sum(log_probabilities[:, :, label_token_ids],
                                        axis=-1)  # [1,66,32000] take the 'neutral' at 28893, each word in sentence has a relationship with 'neutral' => sum their prob across the sentence [66]
-            label_probabilities[:, i] = total_log_prob[:, 0] # following column first [ 28893,5553,6653,..] = > 10 then 10 then 10 then 10 then 10
+            label_probabilities[:, i] = total_log_prob[:,
+                                        0]  # following column first [ 28893,5553,6653,..] = > 10 then 10 then 10 then 10 then 10
         return label_probabilities
 
 
@@ -57,4 +59,8 @@ class LlamaEmbeddingClassifier(torch.nn.Module):
         3) Take the log-softmax of the logits and return log-probabilities over all classes.
         '''
         # todo
-        raise NotImplementedError
+        logits, hidden_state = self.llama(input_ids)
+        hidden_state = hidden_state[:, -1, :]  # [B,hidden_dim]
+        hidden_state = self.dropout(hidden_state)
+        logits_unnorm = self.classifier_head(hidden_state)
+        return F.log_softmax(logits_unnorm, dim=-1)

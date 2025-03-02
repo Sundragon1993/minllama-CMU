@@ -100,7 +100,7 @@ def model_eval(dataloader, model, device):
 	for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
 		b_ids, b_labels, b_sents = batch['token_ids'], batch['labels'], batch['sents']
 
-		b_ids = b_ids.to(device) #[10,66] [B,seqlen]
+		b_ids = b_ids.to(device) #[10,66] [B,seqlen], 66 is max sequence length in batch 10 sentences
 
 		logits = model(b_ids)
 		logits = logits.detach().cpu().numpy()
